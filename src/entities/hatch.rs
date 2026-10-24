@@ -158,9 +158,11 @@ pub struct EllipticArcEdge {
     pub major_axis_endpoint: Vector2,
     /// Ratio of minor axis to major axis
     pub minor_axis_ratio: f64,
-    /// Start angle in radians
+    /// Start as an ellipse parameter in radians, as DWG stores it. DXF group
+    /// 50 holds the circular angle of the same point, in degrees.
     pub start_angle: f64,
-    /// End angle in radians
+    /// End as an ellipse parameter in radians, as DWG stores it. DXF group 51
+    /// holds the circular angle of the same point, in degrees.
     pub end_angle: f64,
     /// Counter-clockwise flag
     pub counter_clockwise: bool,

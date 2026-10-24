@@ -5053,11 +5053,17 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer
                     .write_double(21, ellipse.major_axis_endpoint.y)?;
                 self.writer.write_double(40, ellipse.minor_axis_ratio)?;
-                // DXF stores these angles in degrees. The model uses radians.
-                self.writer
-                    .write_double(50, ellipse.start_angle.to_degrees())?;
-                self.writer
-                    .write_double(51, ellipse.end_angle.to_degrees())?;
+                // DXF stores these ends as circular angles in degrees. The
+                // model holds ellipse parameters in radians.
+                let ratio = ellipse.minor_axis_ratio;
+                self.writer.write_double(
+                    50,
+                    crate::io::dxf::elliptic_edge_degrees(ratio, ellipse.start_angle),
+                )?;
+                self.writer.write_double(
+                    51,
+                    crate::io::dxf::elliptic_edge_degrees(ratio, ellipse.end_angle),
+                )?;
                 self.writer
                     .write_i16(73, if ellipse.counter_clockwise { 1 } else { 0 })?;
             }

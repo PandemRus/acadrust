@@ -35,6 +35,40 @@ pub use writer::{
     DxfBinaryWriter, DxfStreamWriter, DxfStreamWriterExt, DxfTextWriter, DxfWriter, SectionWriter,
 };
 
+/// Ellipse parameter, in radians, of an elliptic hatch edge end stored in
+/// DXF group 50 or 51.
+///
+/// DXF stores these ends as circular angles in degrees, measured from the
+/// major axis. The model, like DWG, holds ellipse parameters. The two differ
+/// when the axis ratio is not 1 (ezdxf `EllipseEdge.start_param`, GDAL
+/// `ogrdxf_hatch.cpp`). The result stays in the same turn as the angle, so a
+/// full-ellipse end of 360 degrees reads as `TAU`.
+pub(crate) fn elliptic_edge_param(axis_ratio: f64, degrees: f64) -> f64 {
+    let angle = degrees.to_radians();
+    if !(axis_ratio > 0.0 && axis_ratio.is_finite() && angle.is_finite()) {
+        return angle;
+    }
+    same_turn(angle.sin().atan2(angle.cos() * axis_ratio), angle)
+}
+
+/// DXF group 50 or 51 value, in degrees, of an elliptic hatch edge end with
+/// ellipse parameter `param`. The inverse of [`elliptic_edge_param`].
+pub(crate) fn elliptic_edge_degrees(axis_ratio: f64, param: f64) -> f64 {
+    if !(axis_ratio > 0.0 && axis_ratio.is_finite() && param.is_finite()) {
+        return writer::degrees(param);
+    }
+    let angle = same_turn((param.sin() * axis_ratio).atan2(param.cos()), param);
+    writer::degrees(angle)
+}
+
+/// `value` moved by whole turns to the turn of `reference`. A circular angle
+/// and its ellipse parameter always lie in the same quadrant, so the nearest
+/// turn is the right one.
+fn same_turn(value: f64, reference: f64) -> f64 {
+    let turn = std::f64::consts::TAU;
+    value + ((reference - value) / turn).round() * turn
+}
+
 pub(crate) fn split_color_book_name(value: &str) -> (Option<String>, Option<String>) {
     let optional = |value: &str| (!value.is_empty()).then(|| value.to_string());
     match value.split_once('$') {

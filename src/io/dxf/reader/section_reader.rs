@@ -854,15 +854,25 @@ fn class_dxf_hatch_context_boundary(
                 end_angle: fields.f64(section, 51).to_radians(),
                 counter_clockwise: fields.bool(section, 73),
             })),
-            3 => path.add_edge(BoundaryEdge::EllipticArc(EllipticArcEdge {
-                center: fields.point2(section, 10),
-                major_axis_endpoint: fields.point2(section, 11),
-                minor_axis_ratio: fields.f64(section, 40),
-                // Groups 50/51 are degrees, same as a circular edge.
-                start_angle: fields.f64(section, 50).to_radians(),
-                end_angle: fields.f64(section, 51).to_radians(),
-                counter_clockwise: fields.bool(section, 73),
-            })),
+            3 => {
+                let center = fields.point2(section, 10);
+                let major_axis_endpoint = fields.point2(section, 11);
+                let minor_axis_ratio = fields.f64(section, 40);
+                // Groups 50/51 are circular angles in degrees, as for a HATCH
+                // edge; the model holds ellipse parameters.
+                let start_angle =
+                    crate::io::dxf::elliptic_edge_param(minor_axis_ratio, fields.f64(section, 50));
+                let end_angle =
+                    crate::io::dxf::elliptic_edge_param(minor_axis_ratio, fields.f64(section, 51));
+                path.add_edge(BoundaryEdge::EllipticArc(EllipticArcEdge {
+                    center,
+                    major_axis_endpoint,
+                    minor_axis_ratio,
+                    start_angle,
+                    end_angle,
+                    counter_clockwise: fields.bool(section, 73),
+                }))
+            }
             4 => {
                 let degree = fields.i32(section, 94);
                 let rational = fields.bool(section, 73);
@@ -15982,6 +15992,12 @@ impl<'a> SectionReader<'a> {
             end_angle: std::f64::consts::TAU,
             counter_clockwise: true,
         };
+        // Groups 50/51 are circular angles in degrees. They become ellipse
+        // parameters once the axis ratio (group 40) is known. A missing or
+        // unparseable 51 keeps the full-ellipse default, which is already a
+        // parameter.
+        let mut start_degrees = None;
+        let mut end_degrees = None;
         // Expected sequence: 10, 20, 11, 21, 40, 50, 51, 73
         for _ in 0..8 {
             if let Some(p) = self.reader.read_pair()? {
@@ -15991,15 +16007,8 @@ impl<'a> SectionReader<'a> {
                     11 => edge.major_axis_endpoint.x = p.as_double().unwrap_or(0.0),
                     21 => edge.major_axis_endpoint.y = p.as_double().unwrap_or(0.0),
                     40 => edge.minor_axis_ratio = p.as_double().unwrap_or(1.0),
-                    // Groups 50/51 are degrees. A missing or unparseable 51
-                    // keeps the full-ellipse default, which is already radians.
-                    50 => edge.start_angle = p.as_double().unwrap_or(0.0).to_radians(),
-                    51 => {
-                        edge.end_angle = p
-                            .as_double()
-                            .map(f64::to_radians)
-                            .unwrap_or(std::f64::consts::TAU)
-                    }
+                    50 => start_degrees = Some(p.as_double().unwrap_or(0.0)),
+                    51 => end_degrees = p.as_double(),
                     73 => edge.counter_clockwise = p.as_i16().unwrap_or(1) != 0,
                     _ => {
                         self.reader.push_back(p);
@@ -16007,6 +16016,13 @@ impl<'a> SectionReader<'a> {
                     }
                 }
             }
+        }
+        let ratio = edge.minor_axis_ratio;
+        if let Some(degrees) = start_degrees {
+            edge.start_angle = crate::io::dxf::elliptic_edge_param(ratio, degrees);
+        }
+        if let Some(degrees) = end_degrees {
+            edge.end_angle = crate::io::dxf::elliptic_edge_param(ratio, degrees);
         }
         Ok(edge)
     }
