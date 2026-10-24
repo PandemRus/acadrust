@@ -39,10 +39,21 @@ use crate::types::Handle;
 use crate::types::LineWeight;
 use std::collections::{HashMap, HashSet};
 
-/// Read the DWG-only context-base flag added in the R2010 layout. ODA
-/// §20.4.89 specifies a default value of true; earlier files retain their
-/// version/default pair.
+/// Context-base file-to-extension-dictionary flag. ODA §20.4.89 lists an
+/// R2010+ bit before the default flag, but native AutoCAD R2010..R2018
+/// records (and LibreDWG) store only `BS version` + `B default`; reading the
+/// extra bit shifts every following field. The flag is therefore not on the
+/// wire and takes ODA's documented default of true.
 fn read_context_file_dictionary_flag(
+    _reader: &mut DwgMergedReader,
+    _version: crate::io::dwg::dwg_version::DwgVersion,
+) -> bool {
+    true
+}
+
+/// Explicit ODA two-bit base, used only as a fallback when the native
+/// one-bit decode of an MLeader context is rejected.
+fn read_oda_context_file_dictionary_flag(
     reader: &mut DwgMergedReader,
     version: crate::io::dwg::dwg_version::DwgVersion,
 ) -> bool {
@@ -7275,7 +7286,7 @@ impl DwgDocumentBuilder {
                                     )
                                 } else {
                                     let has_file_to_extension_dictionary =
-                                        read_context_file_dictionary_flag(
+                                        read_oda_context_file_dictionary_flag(
                                             &mut reader,
                                             self.obj_reader.version(),
                                         );

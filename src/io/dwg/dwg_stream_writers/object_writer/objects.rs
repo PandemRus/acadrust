@@ -2328,13 +2328,14 @@ impl<'a> DwgObjectWriter<'a> {
             &obj.xdictionary_handle,
         );
 
-        // AcDbObjectContextData base (ODA §20.4.89). R2010+ inserts a
-        // file-to-extension-dictionary bit before the default flag. Native
-        // MLeader records keep the historical one-bit base.
+        // AcDbObjectContextData base: native AutoCAD records store only
+        // `BS version` + `B default` in every version. ODA §20.4.89's R2010+
+        // file-to-extension-dictionary bit is kept only for MLeader contexts
+        // read in that two-bit layout.
         self.writer.write_bit_short(obj.class_version);
-        let legacy_mleader_base = obj.uses_legacy_mleader_context_base
+        let oda_mleader_base = !obj.uses_legacy_mleader_context_base
             && matches!(obj.kind, ObjectContextKind::MLeader(_));
-        if self.version.r2010_plus() && !legacy_mleader_base {
+        if self.version.r2010_plus() && oda_mleader_base {
             self.writer.write_bit(obj.has_file_to_extension_dictionary);
         }
         self.writer.write_bit(obj.is_default);
@@ -2471,10 +2472,6 @@ impl<'a> DwgObjectWriter<'a> {
                         self.writer.write_bit(context.has_binary_data);
                     }
                     self.writer.write_bit_short(context.class_version);
-                    if self.version.r2010_plus() {
-                        self.writer
-                            .write_bit(context.has_file_to_extension_dictionary);
-                    }
                     self.writer.write_bit(context.is_default);
                     self.writer.write_bit_long(context.mtext.attachment);
                     self.writer.write_bit_double(context.mtext.x_axis_dir.x);
