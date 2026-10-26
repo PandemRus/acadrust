@@ -122,14 +122,20 @@ impl MTextParser {
         // starts a new span), `%%d`/`%%p`/`%%c` and `%%%%` resolve to symbols,
         // `%%nnn` is a decimal character code, and `\P`/`\p` break paragraphs.
         // Underscoring/overscoring turn off automatically at the string end.
+        let stroke_properties = |u: bool, o: bool| {
+            let mut props = SpanProperties::default();
+            props.set_underline(u);
+            props.set_overline(o);
+            props
+        };
         let flush = |para: &mut MTextParagraph, text: &mut String, u: bool, o: bool| {
             if text.is_empty() {
                 return;
             }
-            let mut props = SpanProperties::default();
-            props.set_underline(u);
-            props.set_overline(o);
-            para.push_span(MTextSpan::new(std::mem::take(text), props));
+            para.push_span(MTextSpan::new(
+                std::mem::take(text),
+                stroke_properties(u, o),
+            ));
         };
 
         let n = self.chars.len();
@@ -204,6 +210,9 @@ impl MTextParser {
                 && (self.chars[self.pos + 1] == 'P' || self.chars[self.pos + 1] == 'p')
             {
                 flush(&mut para, &mut text, underline, overline);
+                // `%%u`/`%%o` carry across the break; at the string end they
+                // turn off, so the last paragraph keeps the default.
+                para.end_properties = stroke_properties(underline, overline);
                 self.document.push_paragraph(std::mem::take(&mut para));
                 self.pos += 2;
                 continue;
@@ -1845,6 +1854,8 @@ mod tests {
             (r"\H3;A\NB", r"\N"),
             ("\\H3;A^JB", "^J"),
             ("\\H3;A\nB", "line feed"),
+            // `\p;` as a break is in question (#229); this only pins that its
+            // properties are recorded before the reset that follows it.
             (r"\H3;A\p;B", r"\p;"),
         ] {
             let doc = parse_mtext(text, false);
@@ -1860,6 +1871,14 @@ mod tests {
             doc.paragraphs[0].end_properties.height,
             Some(MTextScalar::Absolute(3.0))
         );
+    }
+
+    #[test]
+    fn plain_text_paragraph_end_properties_carry_the_open_strokes() {
+        let doc = parse_plain_text("%%uA\\PB");
+        assert!(doc.paragraphs[0].end_properties.stroke.underline());
+        // At the string end underscoring turns off.
+        assert_eq!(doc.paragraphs[1].end_properties, SpanProperties::default());
     }
 
     #[test]

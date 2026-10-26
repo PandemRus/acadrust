@@ -7,7 +7,9 @@
   `\N`, `^J`, a raw line feed, `\p;`) or at the end of the text. An empty
   paragraph has no spans, so this is the only record of the height, font and
   colour its line is set in; groups closed before the break do not apply to
-  it (issue #229).
+  it (issue #229). Breaking: struct literals of `MTextParagraph` need
+  `end_properties: SpanProperties::default()` or `..Default::default()`.
+  Serde input without the field reads as the default.
 - **DWG allocation budget** - `DwgReadOptions::max_decompressed_bytes` caps the
   total decompressed bytes one read allocates across sections and system pages,
   so a small crafted file fails with a `DxfError` instead of exhausting memory.

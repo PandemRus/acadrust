@@ -763,7 +763,9 @@ pub struct MTextParagraph {
     /// An empty paragraph (`A\P\PB`) has no spans, so this is the only record
     /// of the height, font and colour its line is set in. Groups closed before
     /// the break do not apply to it: in `{\H2x;A}\P\PB` the empty line has the
-    /// outer height, in `\H2x;\PA` the doubled one.
+    /// outer height, in `\H2x;\PA` the doubled one. Plain-text parsing (TEXT)
+    /// records only the `%%u`/`%%o` state, which ends at the string end.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub end_properties: SpanProperties,
 }
 
