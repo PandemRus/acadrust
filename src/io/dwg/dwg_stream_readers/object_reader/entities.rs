@@ -20,6 +20,7 @@ use crate::entities::{
     PointCloudExCrop, PointCloudExData, ProxyEntityData, RegisteredClassEntityData, RemoteTextData,
     SectionObjectData, SurfaceData, SurfaceKind, SurfaceSweepOptions,
 };
+use crate::io::dwg::acis_trace::{trace_note, traced, traced_pos};
 use crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader;
 use crate::io::dwg::dwg_version::DwgVersion;
 use crate::io::dwg::mesh_budget::MeshFaceBudget;
@@ -5387,8 +5388,8 @@ pub(super) fn read_extra_acis_data(
         return None;
     }
     let prefix_start = reader.position_in_bits();
-    let _unknown = reader.read_bit();
-    let extra_version = reader.read_bit_short();
+    let _unknown = traced!(reader, "extra_body.unknown_bit", reader.read_bit());
+    let extra_version = traced!(reader, "extra_body.version", reader.read_bit_short());
 
     if extra_version == 2 {
         let data_start = reader.position_in_bits();
@@ -5400,11 +5401,13 @@ pub(super) fn read_extra_acis_data(
         // extra modeler block of an AcDs-backed surface record.
         if !probe.starts_with(b"ACIS BinaryFile") && !probe.starts_with(b"ASM BinaryFile") {
             reader.set_position_in_bits(prefix_start);
+            trace_note!(reader, "extra_body: no SAB header, rewound");
             return None;
         }
         if let Ok((_, used)) = crate::entities::acis::SabReader::read_with_consumed(&probe) {
             if used <= probe.len() {
                 reader.set_position_in_bits(data_start + used as i64 * 8);
+                trace_note!(reader, "extra_body: SAB of {used} bytes ends");
                 return Some(crate::entities::solid3d::AcisData::from_sab(
                     probe[..used].to_vec(),
                 ));
@@ -5445,11 +5448,13 @@ pub(super) fn read_extra_acis_data(
                 }
             })
             .collect();
+        trace_note!(reader, "extra_body: SAT of {} bytes ends", decoded.len());
         let sat = String::from_utf8_lossy(&decoded);
         return Some(crate::entities::solid3d::AcisData::from_sat(&sat));
     }
 
     reader.set_position_in_bits(prefix_start);
+    trace_note!(reader, "extra_body: not present, rewound");
     None
 }
 
@@ -5542,14 +5547,26 @@ fn read_acis_entity_impl(
     inline_layout: bool,
     inline_end: Option<i64>,
 ) -> Option<AcisEntityData> {
+    #[cfg(feature = "trace-acis-records")]
+    let _scope = crate::io::dwg::acis_trace::push_acis_start(reader);
+    trace_note!(
+        reader,
+        "version={version:?} has_ds_data={has_ds_data} allow_extra={allow_extra} \
+         inline_layout={inline_layout} inline_end={inline_end:?}"
+    );
     // R2013+ moved modeler data into AcDs and removed the leading
     // `acis_empty` bit from the entity record.  The first bit after common
     // entity data is `wireframe_data_present` in that layout.  Consuming the
     // legacy bit here shifts every wire/material/revision field by one.
     let acis_empty = if version.r2013_plus(dxf_version) && !inline_layout {
+        trace_note!(
+            reader,
+            "acis_empty={} (not read: R2013+, !has_ds_data)",
+            !has_ds_data
+        );
         !has_ds_data
     } else {
-        reader.read_bit()
+        traced!(reader, "acis_empty", reader.read_bit())
     };
 
     let mut sat_data = String::new();
@@ -5568,9 +5585,9 @@ fn read_acis_entity_impl(
     if !acis_empty && !has_ds_data {
         // Unknown bit — per ODA spec / LibreDWG this B
         // is always present between acis_empty and the version BS.
-        let _unknown = reader.read_bit();
+        let _unknown = traced!(reader, "unknown_bit", reader.read_bit());
 
-        acis_version = reader.read_bit_short();
+        acis_version = traced!(reader, "acis_version", reader.read_bit_short());
         if inline_end.is_some() && !matches!(acis_version, 1 | 2) {
             return None;
         }
@@ -5583,7 +5600,7 @@ fn read_acis_entity_impl(
 
             let mut all_bytes = Vec::new();
             loop {
-                let raw_block_size = reader.read_bit_long();
+                let raw_block_size = traced!(reader, "sat_block_size", reader.read_bit_long());
                 if let Some(end) = inline_end {
                     if raw_block_size < 0
                         || reader.position_in_bits() > end
@@ -5599,6 +5616,7 @@ fn read_acis_entity_impl(
                 let block = reader.read_bytes(block_size);
                 all_bytes.extend_from_slice(&block);
             }
+            trace_note!(reader, "SAT data of {} bytes ends", all_bytes.len());
 
             // Decrypt with selective 159-substitution cipher
             // (per LibreDWG dwg.spec: bytes <= 32 pass through, bytes > 32: 159 - byte)
@@ -5626,6 +5644,7 @@ fn read_acis_entity_impl(
             }
             sab_data = probe[..used].to_vec();
             reader.set_position_in_bits(start + used as i64 * 8);
+            trace_note!(reader, "inline SAB of {used} bytes ends");
         } else if !version.r2007_plus() {
             // SAB binary, R2004–R2006: the bytes flow with NO length prefix
             // ("ACIS BinaryFile…" starts right after the version BS —
@@ -5642,8 +5661,12 @@ fn read_acis_entity_impl(
                     let used = used.min(probe.len());
                     sab_data = probe[..used].to_vec();
                     reader.set_position_in_bits(start + used as i64 * 8);
+                    trace_note!(reader, "SAB of {used} bytes ends");
                 }
-                Err(_) => sab_data = probe,
+                Err(_) => {
+                    sab_data = probe;
+                    trace_note!(reader, "SAB not parsed, all {} bytes taken", sab_data.len());
+                }
             }
         } else {
             // Inline SAB is self-delimited. Measure only its binary records;
@@ -5660,6 +5683,7 @@ fn read_acis_entity_impl(
             reader
                 .main_mut()
                 .set_position_in_bits(start + used as i64 * 8);
+            trace_note!(reader, "SAB of {used} of {} bytes ends", probe.len());
             if used == probe.len() {
                 return Some(AcisEntityData {
                     acis_empty,
@@ -5698,7 +5722,7 @@ fn read_acis_entity_impl(
     //           BL num_silhouettes, sils...
     // An empty wire cache can have either value of isoline_present; only
     // the wire count is omitted when that flag is false.
-    let wireframe_present = reader.read_bit();
+    let wireframe_present = traced!(reader, "wireframe_data_present", reader.read_bit());
     let mut point = Vector3::ZERO;
     let mut point_present = false;
     let mut isoline_present = false;
@@ -5714,15 +5738,39 @@ fn read_acis_entity_impl(
         // and when that runs the wire block off the rails, read it again
         // as a BL from the same point.
         let start = (*reader).clone();
+        #[cfg(feature = "trace-acis-records")]
+        crate::io::dwg::acis_trace::set_pass("colour BS");
         let mut frame = read_wireframe(reader, version, false);
         if reader.check_error().is_err() && version.r2004_plus() {
             let mut retry = start;
+            #[cfg(feature = "trace-acis-records")]
+            {
+                crate::io::dwg::acis_trace::set_pass("colour BL");
+                crate::io::dwg::acis_trace::reset_error_marker();
+            }
+            trace_note!(
+                retry,
+                "BS pass failed; retrying the wireframe with BL colours"
+            );
             let wide = read_wireframe(&mut retry, version, true);
             if retry.check_error().is_ok() {
                 *reader = retry;
                 frame = wide;
             }
+            #[cfg(feature = "trace-acis-records")]
+            crate::io::dwg::acis_trace::set_pass("");
+            trace_note!(
+                reader,
+                "BL retry {}",
+                if reader.check_error().is_ok() {
+                    "kept"
+                } else {
+                    "failed too; BS result kept"
+                }
+            );
         }
+        #[cfg(feature = "trace-acis-records")]
+        crate::io::dwg::acis_trace::set_pass("");
         (point_present, point, isolines, isoline_present, wires, silhouettes) = frame;
     }
 
@@ -5733,7 +5781,7 @@ fn read_acis_entity_impl(
         || (!version.r2013_plus(dxf_version)
             && (version.r2007_plus() || reader.main_remaining_bits() > 0));
     if has_extra_gate {
-        acis_empty_bit = reader.read_bit();
+        acis_empty_bit = traced!(reader, "acis_empty_bit", reader.read_bit());
     }
     let extra_acis_data = if allow_extra && has_extra_gate && !acis_empty_bit {
         read_extra_acis_data(reader, inline_end)
@@ -5744,15 +5792,28 @@ fn read_acis_entity_impl(
     let mut materials = Vec::new();
     if version.r2007_plus() {
         if acis_version > 1 {
-            let count = safe_count(reader.read_bit_long(), reader);
+            let count = traced!(
+                reader,
+                "num_materials",
+                safe_count(reader.read_bit_long(), reader)
+            );
             materials.reserve(count as usize);
             for _ in 0..count {
-                let array_index = reader.read_bit_long();
-                let absolute_reference = reader.read_bit_long();
+                let array_index = traced!(reader, "material.array_index", reader.read_bit_long());
+                let absolute_reference = traced!(
+                    reader,
+                    "material.absolute_reference",
+                    reader.read_bit_long()
+                );
                 let material_handle = if inline_end.is_some() {
-                    reader.read_main_handle()
+                    traced!(reader, "material.handle (main)", reader.read_main_handle())
                 } else {
-                    reader.read_handle()
+                    // Handle-stream read; the main position does not move.
+                    traced!(
+                        reader,
+                        "material.handle (handle stream)",
+                        reader.read_handle()
+                    )
                 };
                 materials.push(AcisMaterial {
                     array_index,
@@ -5762,7 +5823,7 @@ fn read_acis_entity_impl(
             }
         } else {
             // Version-1 and empty bodies carry the legacy unknown BL.
-            let _unknown_2007 = reader.read_bit_long();
+            let _unknown_2007 = traced!(reader, "unknown_2007", reader.read_bit_long());
         }
     }
 
@@ -5770,14 +5831,14 @@ fn read_acis_entity_impl(
     // (and later written back) or the entity stream desyncs — ACAD/TrueView
     // then reject the file.
     let revision = if version.r2013_plus(dxf_version) {
-        let has_guid = reader.read_bit();
-        let major = reader.read_bit_long() as u32;
-        let minor1 = reader.read_bit_short();
-        let minor2 = reader.read_bit_short();
-        let raw = reader.read_bytes(8);
+        let has_guid = traced!(reader, "revision.has_guid", reader.read_bit());
+        let major = traced!(reader, "revision.major", reader.read_bit_long() as u32);
+        let minor1 = traced!(reader, "revision.minor1", reader.read_bit_short());
+        let minor2 = traced!(reader, "revision.minor2", reader.read_bit_short());
+        let raw = traced_pos!(reader, "revision.bytes (8 RC)", reader.read_bytes(8));
         let mut bytes = [0u8; 8];
         bytes[..raw.len()].copy_from_slice(&raw);
-        let end_marker = reader.read_bit_long() as u32;
+        let end_marker = traced!(reader, "revision.end_marker", reader.read_bit_long() as u32);
         AcisRevision {
             has_guid,
             major,
@@ -5823,25 +5884,54 @@ fn read_surface_matrix(reader: &mut DwgMergedReader) -> [f64; 16] {
 }
 
 fn read_surface_sweep_options(reader: &mut DwgMergedReader) -> SurfaceSweepOptions {
-    let draft_angle = reader.read_bit_double();
-    let draft_start_distance = reader.read_bit_double();
-    let draft_end_distance = reader.read_bit_double();
-    let twist_angle = reader.read_bit_double();
-    let scale_factor = reader.read_bit_double();
-    let align_angle = reader.read_bit_double();
-    let is_solid = reader.read_bit();
-    let sweep_alignment_flags = reader.read_bit_short();
-    let path_flags = reader.read_bit_short();
-    let align_start = reader.read_bit();
-    let bank = reader.read_bit();
-    let base_point_set = reader.read_bit();
+    let (draft_angle, draft_start_distance, draft_end_distance, twist_angle, scale_factor) =
+        traced_pos!(reader, "sweep.draft/twist/scale (5 BD)", {
+            (
+                reader.read_bit_double(),
+                reader.read_bit_double(),
+                reader.read_bit_double(),
+                reader.read_bit_double(),
+                reader.read_bit_double(),
+            )
+        });
+    let align_angle = traced_pos!(reader, "sweep.align_angle (BD)", reader.read_bit_double());
+    let is_solid = traced!(reader, "sweep.is_solid", reader.read_bit());
+    let sweep_alignment_flags = traced!(
+        reader,
+        "sweep.sweep_alignment_flags (BS)",
+        reader.read_bit_short()
+    );
+    let path_flags = traced!(reader, "sweep.path_flags (BS)", reader.read_bit_short());
+    let align_start = traced!(reader, "sweep.align_start", reader.read_bit());
+    let bank = traced!(reader, "sweep.bank", reader.read_bit());
+    let base_point_set = traced!(reader, "sweep.base_point_set", reader.read_bit());
     // In DWG the twist reference vector comes before the two
     // transform-computed flags (DXF writes it after them).
-    let reference_vector = reader.read_3bit_double();
-    let sweep_entity_transform_computed = reader.read_bit();
-    let path_entity_transform_computed = reader.read_bit();
-    let sweep_entity_transform = read_surface_matrix(reader);
-    let path_entity_transform = read_surface_matrix(reader);
+    let reference_vector = traced_pos!(
+        reader,
+        "sweep.reference_vector (3BD)",
+        reader.read_3bit_double()
+    );
+    let sweep_entity_transform_computed = traced!(
+        reader,
+        "sweep.sweep_entity_transform_computed",
+        reader.read_bit()
+    );
+    let path_entity_transform_computed = traced!(
+        reader,
+        "sweep.path_entity_transform_computed",
+        reader.read_bit()
+    );
+    let sweep_entity_transform = traced_pos!(
+        reader,
+        "sweep.sweep_entity_transform (16 BD)",
+        read_surface_matrix(reader)
+    );
+    let path_entity_transform = traced_pos!(
+        reader,
+        "sweep.path_entity_transform (16 BD)",
+        read_surface_matrix(reader)
+    );
     SurfaceSweepOptions {
         draft_angle,
         draft_start_distance,
@@ -5868,10 +5958,10 @@ fn read_surface_embedded_entity(
     version: DwgVersion,
     dxf_version: DxfVersion,
 ) -> Option<crate::entities::EmbeddedEntity> {
-    let type_code = reader.read_bit_long();
+    let type_code = traced!(reader, "embedded.type_code (BL)", reader.read_bit_long());
     if crate::io::dwg::embedded_entity::is_body_profile(type_code) {
         // A presence bit (set when there is no body), then the modeler block.
-        let acis_data = if reader.read_bit() {
+        let acis_data = if traced!(reader, "embedded.body_absent", reader.read_bit()) {
             crate::entities::solid3d::AcisData::default()
         } else {
             read_extra_acis_data(reader, None).unwrap_or_default()
@@ -5881,14 +5971,20 @@ fn read_surface_embedded_entity(
             acis_data,
         });
     }
-    let bit_length = safe_count(reader.read_bit_long(), reader) as usize;
-    crate::io::dwg::embedded_entity::read_embedded_entity_bits(
+    let bit_length = traced!(
+        reader,
+        "embedded.bit_length (BL)",
+        safe_count(reader.read_bit_long(), reader)
+    ) as usize;
+    let entity = crate::io::dwg::embedded_entity::read_embedded_entity_bits(
         reader,
         type_code,
         bit_length,
         version,
         dxf_version,
-    )
+    );
+    trace_note!(reader, "embedded entity ends (read: {})", entity.is_some());
+    entity
 }
 
 pub fn read_surface(
@@ -5931,28 +6027,40 @@ pub fn read_surface(
     // solid reader leaves it in the stream. Accept it only when the
     // following isoline counts are plausible; otherwise rewind.
     let modeler_format_version = 1;
+    trace_note!(reader, "surface: shared ACIS block ends");
     if acis.extra_acis_data.is_none() && !reader.has_error() {
         let body_start = reader.position_in_bits();
+        trace_note!(reader, "surface: probing a second modeler body");
         if let Some(body) = read_extra_acis_data(reader, None) {
             let mut peek = reader.clone();
             let u = peek.read_bit_short();
             let v = peek.read_bit_short();
             if (0..=512).contains(&u) && (0..=512).contains(&v) && !peek.has_error() {
                 acis.extra_acis_data = Some(body);
+                trace_note!(reader, "surface: second modeler body kept");
             } else {
                 reader.set_position_in_bits(body_start);
+                trace_note!(reader, "surface: second modeler body rejected, rewound");
             }
         }
     }
-    let u_isolines = reader.read_bit_short();
-    let v_isolines = reader.read_bit_short();
+    let u_isolines = traced!(reader, "surface.u_isolines (BS)", reader.read_bit_short());
+    let v_isolines = traced!(reader, "surface.v_isolines (BS)", reader.read_bit_short());
     let surface_data = match kind {
         SurfaceKind::Generic => SurfaceData::Generic,
         SurfaceKind::Plane => SurfaceData::Plane { class_version: 0 },
         SurfaceKind::Extruded => {
             let options = read_surface_sweep_options(reader);
-            let sweep_vector = reader.read_3bit_double();
-            let sweep_transform = read_surface_matrix(reader);
+            let sweep_vector = traced_pos!(
+                reader,
+                "extruded.sweep_vector (3BD)",
+                reader.read_3bit_double()
+            );
+            let sweep_transform = traced_pos!(
+                reader,
+                "extruded.sweep_transform (16 BD)",
+                read_surface_matrix(reader)
+            );
             let sweep_entity = read_surface_embedded_entity(reader, version, dxf_version);
             SurfaceData::Extruded {
                 sweep_entity,
@@ -5962,7 +6070,11 @@ pub fn read_surface(
             }
         }
         SurfaceKind::Lofted => {
-            let loft_transform = read_surface_matrix(reader);
+            let loft_transform = traced_pos!(
+                reader,
+                "lofted.loft_transform (16 BD)",
+                read_surface_matrix(reader)
+            );
             let mut cross_section_entities = Vec::new();
             let mut guide_entities = Vec::new();
             let mut path_entity = None;
@@ -5981,23 +6093,56 @@ pub fn read_surface(
                 ruled_surface,
                 virtual_guide,
             ) = {
-                let cross_count = safe_count(reader.read_bit_short() as i32, reader);
-                let guide_count = safe_count(reader.read_bit_short() as i32, reader);
-                let has_path = reader.read_bit();
+                let cross_count = traced!(
+                    reader,
+                    "lofted.num_cross_sections (BS)",
+                    safe_count(reader.read_bit_short() as i32, reader)
+                );
+                let guide_count = traced!(
+                    reader,
+                    "lofted.num_guides (BS)",
+                    safe_count(reader.read_bit_short() as i32, reader)
+                );
+                let has_path = traced!(reader, "lofted.has_path", reader.read_bit());
+                let drafts = traced_pos!(reader, "lofted.draft angles/magnitudes (4 BD)", {
+                    (
+                        reader.read_bit_double(),
+                        reader.read_bit_double(),
+                        reader.read_bit_double(),
+                        reader.read_bit_double(),
+                    )
+                });
+                let flags = traced!(reader, "lofted.flags (8 B)", {
+                    (
+                        reader.read_bit(),
+                        reader.read_bit(),
+                        reader.read_bit(),
+                        reader.read_bit(),
+                        reader.read_bit(),
+                        reader.read_bit(),
+                        reader.read_bit(),
+                        reader.read_bit(),
+                    )
+                });
+                let lofting_type = traced!(
+                    reader,
+                    "lofted.plane_normal_lofting_type (BL)",
+                    reader.read_bit_long()
+                );
                 let values = (
-                    reader.read_bit_double(),
-                    reader.read_bit_double(),
-                    reader.read_bit_double(),
-                    reader.read_bit_double(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                    reader.read_bit(),
-                    reader.read_bit_long(),
+                    drafts.0,
+                    drafts.1,
+                    drafts.2,
+                    drafts.3,
+                    flags.0,
+                    flags.1,
+                    flags.2,
+                    flags.3,
+                    flags.4,
+                    flags.5,
+                    flags.6,
+                    flags.7,
+                    lofting_type,
                 );
                 cross_section_entities.reserve(cross_count as usize);
                 guide_entities.reserve(guide_count as usize);
@@ -6053,18 +6198,50 @@ pub fn read_surface(
                 solid,
                 close_to_axis,
             ) = (
-                reader.read_bit_double(),
-                reader.read_bit_double(),
-                reader.read_bit_double(),
-                reader.read_bit_double(),
-                reader.read_bit(),
-                reader.read_bit(),
+                traced_pos!(
+                    reader,
+                    "revolved.draft_angle (BD)",
+                    reader.read_bit_double()
+                ),
+                traced_pos!(
+                    reader,
+                    "revolved.draft_start (BD)",
+                    reader.read_bit_double()
+                ),
+                traced_pos!(reader, "revolved.draft_end (BD)", reader.read_bit_double()),
+                traced_pos!(
+                    reader,
+                    "revolved.twist_angle (BD)",
+                    reader.read_bit_double()
+                ),
+                traced!(reader, "revolved.solid", reader.read_bit()),
+                traced!(reader, "revolved.close_to_axis", reader.read_bit()),
             );
-            let axis_point = reader.read_3bit_double();
-            let axis_vector = reader.read_3bit_double();
-            let revolve_angle = reader.read_bit_double();
-            let start_angle = reader.read_bit_double();
-            let entity_transform = read_surface_matrix(reader);
+            let axis_point = traced_pos!(
+                reader,
+                "revolved.axis_point (3BD)",
+                reader.read_3bit_double()
+            );
+            let axis_vector = traced_pos!(
+                reader,
+                "revolved.axis_vector (3BD)",
+                reader.read_3bit_double()
+            );
+            let revolve_angle = traced_pos!(
+                reader,
+                "revolved.revolve_angle (BD)",
+                reader.read_bit_double()
+            );
+            let start_angle = traced_pos!(
+                reader,
+                "revolved.start_angle (BD)",
+                reader.read_bit_double()
+            );
+            let entity_transform = traced_pos!(
+                reader,
+                "revolved.entity_transform (16 BD)",
+                read_surface_matrix(reader)
+            );
             let revolve_entity = read_surface_embedded_entity(reader, version, dxf_version);
             SurfaceData::Revolved {
                 revolve_entity,
@@ -6085,8 +6262,16 @@ pub fn read_surface(
         }
         SurfaceKind::Swept => {
             let options = read_surface_sweep_options(reader);
-            let sweep_transform = read_surface_matrix(reader);
-            let path_transform = read_surface_matrix(reader);
+            let sweep_transform = traced_pos!(
+                reader,
+                "swept.sweep_transform (16 BD)",
+                read_surface_matrix(reader)
+            );
+            let path_transform = traced_pos!(
+                reader,
+                "swept.path_transform (16 BD)",
+                read_surface_matrix(reader)
+            );
             let sweep_entity = read_surface_embedded_entity(reader, version, dxf_version);
             let path_entity = read_surface_embedded_entity(reader, version, dxf_version);
             SurfaceData::Swept {
@@ -6100,13 +6285,24 @@ pub fn read_surface(
         }
         SurfaceKind::Nurb => {
             if version.r2013_plus(dxf_version) {
+                let short_170 = traced!(reader, "nurb.short_170 (BS)", reader.read_bit_short());
+                let cv_hull_display = traced!(reader, "nurb.cv_hull_display", reader.read_bit());
+                let (u_vector1, v_vector1, u_vector2, v_vector2) =
+                    traced_pos!(reader, "nurb.u/v vectors (4x 3BD)", {
+                        (
+                            reader.read_3bit_double(),
+                            reader.read_3bit_double(),
+                            reader.read_3bit_double(),
+                            reader.read_3bit_double(),
+                        )
+                    });
                 SurfaceData::Nurb {
-                    short_170: reader.read_bit_short(),
-                    cv_hull_display: reader.read_bit(),
-                    u_vector1: reader.read_3bit_double(),
-                    v_vector1: reader.read_3bit_double(),
-                    u_vector2: reader.read_3bit_double(),
-                    v_vector2: reader.read_3bit_double(),
+                    short_170,
+                    cv_hull_display,
+                    u_vector1,
+                    v_vector1,
+                    u_vector2,
+                    v_vector2,
                 }
             } else {
                 SurfaceData::Nurb {
@@ -6146,15 +6342,20 @@ fn read_wireframe(
     let mut wires = Vec::new();
     let mut silhouettes = Vec::new();
     // LibreDWG COMMON_3DSOLID: a point_present bit gates the 3BD point.
-    let point_present = reader.read_bit();
+    let point_present = traced!(reader, "point_present", reader.read_bit());
     if point_present {
-        point = reader.read_3bit_double();
+        point = traced_pos!(reader, "point (3BD)", reader.read_3bit_double());
     }
-    let isolines = reader.read_bit_long();
-    let isoline_present = reader.read_bit();
+    let isolines = traced!(reader, "num_isolines", reader.read_bit_long());
+    let isoline_present = traced!(reader, "isoline_present", reader.read_bit());
     if isoline_present {
-        let num_wires = safe_count(reader.read_bit_long(), reader);
-        for _ in 0..num_wires {
+        let num_wires = traced!(
+            reader,
+            "num_wires",
+            safe_count(reader.read_bit_long(), reader)
+        );
+        for _index in 0..num_wires {
+            trace_note!(reader, "wire[{_index}] starts");
             wires.push(read_wire(reader, wide_color));
         }
     }
@@ -6162,25 +6363,52 @@ fn read_wireframe(
     // The isoline flag gates only the wire array. The silhouette
     // count is always present in a wireframe block, including zero
     // when there are no silhouettes (ODA DWG spec, section 20.4.41).
-    let num_silhouettes = safe_count(reader.read_bit_long(), reader);
-    for _ in 0..num_silhouettes {
+    trace_note!(reader, "wire array ends");
+    let num_silhouettes = traced!(
+        reader,
+        "num_silhouettes",
+        safe_count(reader.read_bit_long(), reader)
+    );
+    for _index in 0..num_silhouettes {
+        trace_note!(reader, "silhouette[{_index}] starts");
         // Native R2010+ silhouettes store a BLL viewport identity.
         // Earlier records use BL, including compact zero identities.
         let viewport_id = if version.r2010_plus() {
-            reader.read_bit_long_long()
+            traced!(
+                reader,
+                "silhouette.viewport_id (BLL)",
+                reader.read_bit_long_long()
+            )
         } else {
-            i64::from(reader.read_bit_long())
+            traced!(
+                reader,
+                "silhouette.viewport_id (BL)",
+                i64::from(reader.read_bit_long())
+            )
         };
-        let target = reader.read_3bit_double();
-        let view_direction = reader.read_3bit_double();
-        let up_vector = reader.read_3bit_double();
-        let is_perspective = reader.read_bit();
+        let target = traced_pos!(reader, "silhouette.target (3BD)", reader.read_3bit_double());
+        let view_direction = traced_pos!(
+            reader,
+            "silhouette.view_direction (3BD)",
+            reader.read_3bit_double()
+        );
+        let up_vector = traced_pos!(
+            reader,
+            "silhouette.up_vector (3BD)",
+            reader.read_3bit_double()
+        );
+        let is_perspective = traced!(reader, "silhouette.is_perspective", reader.read_bit());
         let mut sil_wires = Vec::new();
-        let has_sil_wires = reader.read_bit();
+        let has_sil_wires = traced!(reader, "silhouette.has_wires", reader.read_bit());
         if has_sil_wires {
-            let num_sw = safe_count(reader.read_bit_long(), reader);
+            let num_sw = traced!(
+                reader,
+                "silhouette.num_wires",
+                safe_count(reader.read_bit_long(), reader)
+            );
             sil_wires.reserve(num_sw as usize);
-            for _ in 0..num_sw {
+            for _wire_index in 0..num_sw {
+                trace_note!(reader, "silhouette[{_index}].wire[{_wire_index}] starts");
                 sil_wires.push(read_wire(reader, wide_color));
             }
         }
@@ -6200,35 +6428,54 @@ fn read_wireframe(
 /// One cached wire of an ACIS entity; `wide_color` reads its colour as a BL
 /// rather than a BS (see `read_wireframe`'s caller).
 fn read_wire(reader: &mut DwgMergedReader, wide_color: bool) -> Wire {
-    let wire_type_raw = reader.read_byte();
-    let selection_marker = reader.read_bit_long();
+    let wire_type_raw = traced!(reader, "wire.type (RC)", reader.read_byte());
+    let selection_marker = traced!(reader, "wire.selection_marker (BL)", reader.read_bit_long());
     let color_val = if wide_color {
-        reader.read_bit_long()
+        traced!(reader, "wire.colour (BL)", reader.read_bit_long())
     } else {
-        i32::from(reader.read_bit_short())
+        traced!(
+            reader,
+            "wire.colour (BS)",
+            i32::from(reader.read_bit_short())
+        )
     };
-    let acis_index = reader.read_bit_long();
-    let num_pts = safe_count(reader.read_bit_long(), reader);
+    let acis_index = traced!(reader, "wire.acis_index (BL)", reader.read_bit_long());
+    let num_pts = traced!(
+        reader,
+        "wire.num_points (BL)",
+        safe_count(reader.read_bit_long(), reader)
+    );
     let mut pts = Vec::with_capacity(num_pts as usize);
-    for _ in 0..num_pts {
-        pts.push(reader.read_3bit_double());
-    }
-    let has_transform = reader.read_bit();
+    traced_pos!(reader, "wire.points (3BD each)", {
+        for _ in 0..num_pts {
+            pts.push(reader.read_3bit_double());
+        }
+    });
+    let has_transform = traced!(reader, "wire.transform_present", reader.read_bit());
     let (mut x_axis, mut y_axis, mut z_axis) = (Vector3::UNIT_X, Vector3::UNIT_Y, Vector3::UNIT_Z);
     let mut translation = Vector3::ZERO;
     let mut scale = Vector3::new(1.0, 1.0, 1.0);
     let (mut has_rotation, mut has_reflection, mut has_shear) = (false, false, false);
     if has_transform {
-        x_axis = reader.read_3bit_double();
-        y_axis = reader.read_3bit_double();
-        z_axis = reader.read_3bit_double();
-        translation = reader.read_3bit_double();
+        (x_axis, y_axis, z_axis, translation) =
+            traced_pos!(reader, "wire.transform axes+translation (4x 3BD)", {
+                (
+                    reader.read_3bit_double(),
+                    reader.read_3bit_double(),
+                    reader.read_3bit_double(),
+                    reader.read_3bit_double(),
+                )
+            });
         // The scale is one BD (uniform scale), not a 3BD.
-        let uniform = reader.read_bit_double();
+        let uniform = traced_pos!(
+            reader,
+            "wire.transform scale (BD)",
+            reader.read_bit_double()
+        );
         scale = Vector3::new(uniform, uniform, uniform);
-        has_rotation = reader.read_bit();
-        has_reflection = reader.read_bit();
-        has_shear = reader.read_bit();
+        has_rotation = traced!(reader, "wire.has_rotation", reader.read_bit());
+        has_reflection = traced!(reader, "wire.has_reflection", reader.read_bit());
+        has_shear = traced!(reader, "wire.has_shear", reader.read_bit());
     }
     let color = if color_val == 256 {
         Color::ByLayer

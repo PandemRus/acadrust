@@ -58,6 +58,7 @@ mod unwind_tests {
     }
 }
 
+pub mod acis_trace;
 pub mod annotative_eed;
 pub mod checksum;
 pub mod compression;

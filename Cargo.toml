@@ -17,6 +17,8 @@ default = ["parallel"]
 parallel = ["dep:rayon"]
 serde = ["dep:serde", "bitflags/serde", "indexmap/serde"]
 import = ["dep:quick-xml", "dep:serde_json"]
+# Field trace of DWG modeler-geometry records to stderr (diagnostics only).
+trace-acis-records = []
 
 [dependencies]
 # Error handling
@@ -65,6 +67,10 @@ rayon = { version = "1", optional = true }
 criterion = "0.5"
 proptest = "1.4"
 serde_json = "1"
+
+[[example]]
+name = "trace_acis"
+required-features = ["trace-acis-records"]
 
 [profile.release]
 opt-level = 3

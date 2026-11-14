@@ -5658,6 +5658,8 @@ impl DwgDocumentBuilder {
 
                 // ── ACIS entities (3DSOLID, REGION, BODY) ───────────
                 OBJ_3DSOLID => {
+                    #[cfg(feature = "trace-acis-records")]
+                    crate::io::dwg::acis_trace::begin(reader, handle, "3DSOLID");
                     let data = entities::read_acis_entity(
                         &mut reader,
                         self.obj_reader.version(),
@@ -5700,14 +5702,22 @@ impl DwgDocumentBuilder {
                     // 3DSOLID R2007+: history_id handle
                     // (always present since R2007, regardless of ACIS version)
                     if self.obj_reader.version().r2007_plus() {
-                        let h = reader.read_handle();
+                        let h = crate::io::dwg::acis_trace::traced!(
+                            reader,
+                            "history_handle (handle stream)",
+                            reader.read_handle()
+                        );
                         if h != 0 {
                             e.history_handle = Some(Handle::new(h));
                         }
                     }
+                    #[cfg(feature = "trace-acis-records")]
+                    crate::io::dwg::acis_trace::end(reader);
                     let _ = document.add_entity(EntityType::Solid3D(e));
                 }
                 OBJ_REGION => {
+                    #[cfg(feature = "trace-acis-records")]
+                    crate::io::dwg::acis_trace::begin(reader, handle, "REGION");
                     let data = entities::read_acis_entity(
                         &mut reader,
                         self.obj_reader.version(),
@@ -5746,9 +5756,13 @@ impl DwgDocumentBuilder {
                     };
                     e.wires = data.wires;
                     e.silhouettes = data.silhouettes;
+                    #[cfg(feature = "trace-acis-records")]
+                    crate::io::dwg::acis_trace::end(reader);
                     let _ = document.add_entity(EntityType::Region(e));
                 }
                 OBJ_BODY => {
+                    #[cfg(feature = "trace-acis-records")]
+                    crate::io::dwg::acis_trace::begin(reader, handle, "BODY");
                     let data = entities::read_acis_entity(
                         &mut reader,
                         self.obj_reader.version(),
@@ -5798,6 +5812,8 @@ impl DwgDocumentBuilder {
                             e.history_handle = Some(Handle::new(h));
                         }
                     }
+                    #[cfg(feature = "trace-acis-records")]
+                    crate::io::dwg::acis_trace::end(reader);
                     let _ = document.add_entity(EntityType::Body(e));
                 }
 
@@ -5813,6 +5829,20 @@ impl DwgDocumentBuilder {
                         OBJ_NURBSURFACE => crate::entities::SurfaceKind::Nurb,
                         _ => crate::entities::SurfaceKind::Generic,
                     };
+                    #[cfg(feature = "trace-acis-records")]
+                    crate::io::dwg::acis_trace::begin(
+                        reader,
+                        handle,
+                        match type_code {
+                            OBJ_PLANESURFACE => "PLANESURFACE",
+                            OBJ_EXTRUDEDSURFACE => "EXTRUDEDSURFACE",
+                            OBJ_LOFTEDSURFACE => "LOFTEDSURFACE",
+                            OBJ_REVOLVEDSURFACE => "REVOLVEDSURFACE",
+                            OBJ_SWEPTSURFACE => "SWEPTSURFACE",
+                            OBJ_NURBSURFACE => "NURBSURFACE",
+                            _ => "SURFACE",
+                        },
+                    );
                     let data = entities::read_surface(
                         &mut reader,
                         self.obj_reader.version(),
@@ -5847,6 +5877,8 @@ impl DwgDocumentBuilder {
                     e.surface_data = data.surface_data;
                     e.history_handle =
                         (data.history_handle != 0).then(|| Handle::from(data.history_handle));
+                    #[cfg(feature = "trace-acis-records")]
+                    crate::io::dwg::acis_trace::end(reader);
                     let _ = document.add_entity(EntityType::Surface(Box::new(e)));
                 }
 
